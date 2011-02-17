@@ -27,6 +27,7 @@ import android.os.RemoteException;
 import android.os.Handler;
 import android.os.Message;
 import android.os.ServiceManager;
+import android.os.SystemProperties;
 import android.util.Log;
 import android.util.SparseArray;
 import android.view.IRotationWatcher;
@@ -330,6 +331,82 @@ public class SensorManager
                 mDataChannel = dataChannel;
             }
 
+            /* swapVector: Contains an int for each axis representing
+             *             which axis to replace it with. If negative,
+             *             values must be swapped also.
+             *             Axes are numbered 1..NUM_AXES
+             */
+            private static final String PROPERTY_SWAP_ACCEL = "debug.sensors.swap_accel";
+            private static final int NUM_AXES = 3;
+            private final int[] swapVector = new int[NUM_AXES];
+            private final float[] tmpValues = new float[NUM_AXES];
+            private boolean mustSwapVectors = false;
+
+            private void swapAxes(final float[] values) {
+                int oldIndex;
+                int i;
+                
+                for (i = 0; i < NUM_AXES; i++) {
+                    tmpValues[i] = values[i];
+                }
+                
+                for (i = 0; i < NUM_AXES; i++) {
+                    values[i] = tmpValues[Math.abs(swapVector[i]) - 1] * Math.signum(swapVector[i]);
+                }
+            }
+            
+            private int[] calcSwapVector(final String swapData) {
+                /*
+                 * Calculates a swap vector for the axes of a sensor.
+                 */
+                final String[] swapParts = swapData.split(",", NUM_AXES);
+                int[] result = new int[NUM_AXES];
+                
+                if (swapParts.length != NUM_AXES) {
+                    return null;
+                }
+                
+                for (int i = 0; i < NUM_AXES; i++) {
+                    final String axis = swapParts[i];
+                    int oldIndex;
+                    
+                    if (axis.length() < 1 || axis.length() > 2) {
+                        return null;
+                    }
+                    
+                    oldIndex = "xyz".indexOf(axis.charAt(axis.length() - 1));
+                    
+                    if (oldIndex < 0 || oldIndex >= NUM_AXES) {
+                        return null;
+                    }
+                    
+                    if (axis.length() == 2 && axis.charAt(0) != '-') {
+                        return null;
+                    }
+                    
+                    result[i] = (oldIndex + 1) * (axis.length() == 2 ? -1 : 1);
+                }
+                
+                return result;
+            }
+
+            private void initAccelerometerSwapping() {
+                final String swapData = SystemProperties.get(PROPERTY_SWAP_ACCEL);
+
+                if (swapData != null && !swapData.equals("")) {
+                    int[] newVector = calcSwapVector(swapData);
+                    if (newVector != null) {
+                        for (int i = 0; i < NUM_AXES; i++) {
+                            swapVector[i] = newVector[i];
+                        }
+                        mustSwapVectors = true;
+                        Log.i(TAG, "Initialized axis swap vector with: " + swapData);
+                    } else {
+                    	Log.e(TAG, "Error parsing " + PROPERTY_SWAP_ACCEL + " system property");
+                    }
+                }
+            }
+
             private boolean open() {
                 // NOTE: this cannot synchronize on sListeners, since
                 // it's held in the main thread at least until we
@@ -384,6 +461,9 @@ public class SensorManager
                     this.notify();
                 }
 
+                // check if we need to swap accelerometer axes.
+                initAccelerometerSwapping();
+                
                 while (true) {
                     // wait for an event
                     final int sensor = sensors_data_poll(values, status, timestamp);
@@ -404,6 +484,11 @@ public class SensorManager
                         }
                         final Sensor sensorObject = sHandleToSensor.get(sensor);
                         if (sensorObject != null) {
+                        	// optionally swap axes 
+                        	if (mustSwapVectors && sensorObject.getType() == Sensor.TYPE_ACCELEROMETER) {
+                        		swapAxes(values);
+                        	}
+                        	
                             // report the sensor event to all listeners that
                             // care about it.
                             final int size = sListeners.size();
